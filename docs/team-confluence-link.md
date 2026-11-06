@@ -15,7 +15,6 @@ Confluence 页面的关联。工具使用当前用户的 Jira、Confluence 凭�
 1. 使用当前请求的 Confluence 客户端读取页面，验证页面可访问、已发布，取得真实标题。
 2. 按 Confluence 应用类型、站点和页面 ID 查找原生关联。没有则创建，
    已有且正确则复用，需要更新时保留关联 ID、摘要、图标和状态。
-   普通 Web links 作为独立记录完整保留，包括指向同一页面的链接。
 3. 写入 `application.type=com.atlassian.confluence`、应用名称、
    `relationship=Wiki Page` 和页面信息。**无需查询或配置 `appId`。**
 4. 新建链接使用规范页面 URL 的 SHA-256 构造稳定的 `globalId`，用于 Jira upsert；
@@ -118,8 +117,7 @@ uv run python scripts/generate_tool_docs.py --check
 ```
 
 在专用测试工单上依次验证：首次创建、再次调用返回 unchanged、已有原生关联
-的标题更新，以及 Jira 页面显示 Confluence 卡片。若存在指向同一页面的普通
-Web Link，应确认其记录保持原状。权限不足时应返回错误。
+的标题更新，以及 Jira 页面显示 Confluence 卡片。权限不足时应返回错误。
 本地单元测试使用模拟 API，部署时还需验证真实 API 和界面展示。
 
 ## 官方接口依据

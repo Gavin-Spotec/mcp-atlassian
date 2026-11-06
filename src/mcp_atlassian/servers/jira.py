@@ -3047,10 +3047,8 @@ async def ensure_confluence_link(
     or administrator application-link discovery is required. Reads the real
     page title and creates or updates a native Confluence link with a stable,
     caller-defined globalId. Existing native links retain their identity.
-    Ordinary Web Links are preserved as separate records, including those
-    pointing to the same page. Ambiguous native links or identity conflicts
-    return an error. Only a successful REST readback returns verified=true;
-    this does not verify the UI.
+    Ambiguous native links or identity conflicts return an error. Only a
+    successful REST readback returns verified=true; this does not verify the UI.
     Short links and Server/Data Center are not supported by this tool.
 
     Args:

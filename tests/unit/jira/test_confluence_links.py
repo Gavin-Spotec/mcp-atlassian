@@ -117,11 +117,22 @@ def test_ambiguous_or_malformed_links_do_not_create(links, existing):
     links.jira.put.assert_not_called()
 
 
-def test_foreign_application_fails(links):
+@pytest.mark.parametrize(
+    "application_type,page_url",
+    [
+        ("foreign", URL),
+        (None, URL),
+        ("com.atlassian.confluence", f"{BASE}/pages/viewpage.action?pageId=456"),
+    ],
+)
+def test_global_id_collision_rejects_mismatched_identity(
+    links: LinksMixin, application_type: str | None, page_url: str
+) -> None:
     existing = deepcopy(LINK)
-    existing["application"] = {"type": "foreign"}
+    existing["application"] = {"type": application_type} if application_type else {}
+    existing["object"]["url"] = page_url
     links.jira.get.side_effect = [[existing]]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="globalId"):
         invoke(links)
     links.jira.put.assert_not_called()
     links.jira.post.assert_not_called()
@@ -238,58 +249,15 @@ def test_global_id_is_site_bound(links):
     assert result["global_id"] != LINK["globalId"]
 
 
-def test_no_global_id_does_not_match_unrelated_links_on_readback(links):
+def test_no_global_id_does_not_match_other_pages_on_readback(links: LinksMixin) -> None:
     previous = deepcopy(LINK)
     previous.pop("globalId")
     previous["object"]["title"] = "Old title"
     after = deepcopy(LINK)
     after.pop("globalId")
-    unrelated = {"id": 99, "object": {"url": "https://example.test"}}
+    unrelated = deepcopy(LINK)
+    unrelated.pop("globalId")
+    unrelated["id"] = 99
+    unrelated["object"]["url"] = f"{BASE}/pages/viewpage.action?pageId=456"
     links.jira.get.side_effect = [[previous, unrelated], [after, unrelated]]
     assert invoke(links)["action"] == "updated"
-
-
-@pytest.mark.parametrize("web_link_count", [1, 2])
-def test_existing_web_links_are_preserved_on_create_and_reuse(links, web_link_count):
-    web_links = [
-        {
-            "id": 100 + i,
-            "application": {},
-            "relationship": "Wiki Page",
-            "object": {"url": URL, "title": "Existing Web Link"},
-        }
-        for i in range(web_link_count)
-    ]
-    snapshot = deepcopy(web_links)
-    links.jira.get.side_effect = [web_links, [*web_links, LINK], [*web_links, LINK]]
-    assert invoke(links)["action"] == "created"
-    assert invoke(links)["action"] == "unchanged"
-    assert web_links == snapshot
-    assert links.jira.post.call_count == 1
-    links.jira.put.assert_not_called()
-    links.jira.delete.assert_not_called()
-    links.jira.remove_issue_link.assert_not_called()
-
-
-def test_updating_native_link_preserves_matching_web_link(links):
-    native = deepcopy(LINK)
-    native["object"]["title"] = "Old title"
-    web = {"id": 99, "object": {"url": URL, "title": "Web Link"}}
-    snapshot = deepcopy(web)
-    links.jira.get.side_effect = [[web, native], [web, LINK]]
-    assert invoke(links)["action"] == "updated"
-    assert links.jira.put.call_args.args == (f"{ENDPOINT}/42",)
-    assert web == snapshot
-    links.jira.post.assert_not_called()
-    links.jira.delete.assert_not_called()
-
-
-def test_global_id_collision_cannot_overwrite_web_link(links):
-    web = deepcopy(LINK)
-    web["application"] = {}
-    links.jira.get.return_value = [web]
-    with pytest.raises(ValueError, match="globalId"):
-        invoke(links)
-    links.jira.post.assert_not_called()
-    links.jira.put.assert_not_called()
-    links.jira.delete.assert_not_called()

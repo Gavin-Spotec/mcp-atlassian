@@ -352,8 +352,7 @@ class LinksMixin(JiraClient):
                     isinstance(application, dict)
                     and application.get("type") == "com.atlassian.confluence"
                 )
-                # 普通 Web Link 属于独立记录，保留原状；只管理原生 Confluence 关联。
-                # POST 会按 globalId 更新，先检查冲突，避免覆盖其他类型的链接。
+                # POST 会按 globalId 更新，先核对应用类型和页面身份，避免误覆盖。
                 if global_id and link.get("globalId") == global_id:
                     if not is_confluence or not same_page:
                         raise ValueError(
