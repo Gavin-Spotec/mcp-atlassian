@@ -300,7 +300,7 @@ class LinksMixin(JiraClient):
     def ensure_confluence_link(
         self, issue_key: str, base_url: str, page_id: str, title: str
     ) -> dict[str, Any]:
-        """Create, repair or reuse a native Confluence remote link on Jira Cloud.
+        """Create, update or reuse a native Confluence remote link on Jira Cloud.
 
         Args:
             issue_key: Jira issue key.
@@ -347,24 +347,27 @@ class LinksMixin(JiraClient):
                         same_page = confluence_page_id(address, base_url) == page_id
                     except ValueError:
                         pass
-                if same_page or (global_id and link.get("globalId") == global_id):
+                application = link.get("application") or {}
+                is_confluence = (
+                    isinstance(application, dict)
+                    and application.get("type") == "com.atlassian.confluence"
+                )
+                # 普通 Web Link 属于独立记录，保留原状；只管理原生 Confluence 关联。
+                # POST 会按 globalId 更新，先检查冲突，避免覆盖其他类型的链接。
+                if global_id and link.get("globalId") == global_id:
+                    if not is_confluence or not same_page:
+                        raise ValueError(
+                            "The globalId is already used by another link."
+                        )
+                if is_confluence and same_page:
                     matches.append(link)
             if len(matches) > 1:
-                raise ValueError(
-                    "Multiple links reference this Confluence page; "
-                    "resolve duplicates before retrying. No links were deleted."
-                )
+                raise ValueError("Multiple native Confluence links match this page.")
             return matches
 
         candidates = read_candidates()
         previous = candidates[0] if candidates else None
         application = (previous or {}).get("application") or {}
-        if not isinstance(application, dict) or application.get("type") not in (
-            None,
-            "",
-            "com.atlassian.confluence",
-        ):
-            raise ValueError("Existing page link belongs to another application.")
         # 原有关联可能没有 globalId，也可能使用旧的 appId 格式；均保留其身份。
         # 按现有 link ID 更新，不为已经正确的关联额外写入或生成重复链接。
         if previous:

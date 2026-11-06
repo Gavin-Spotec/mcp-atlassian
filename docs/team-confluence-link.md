@@ -1,8 +1,7 @@
 # 团队版 Jira–Confluence 关联工具
 
-本仓库是 `sooperset/mcp-atlassian` 的团队 fork。新增工具是
-`jira_ensure_confluence_link`（遵循上游 `jira_` 前缀），不是官方 Rovo MCP 工具，
-也不使用 `ensure_jira_confluence_link` 这个未注册名称。
+`jira_ensure_confluence_link` 用于创建、更新、复用并验证 Jira 工单与
+Confluence 页面的关联。工具使用当前用户的 Jira、Confluence 凭据。
 
 ## 工具行为
 
@@ -14,8 +13,9 @@
 ```
 
 1. 使用当前请求的 Confluence 客户端读取页面，验证页面可访问、已发布，取得真实标题。
-2. 按站点和页面 ID 查找关联。唯一普通 Web Link 原地修复，
-   保留链接 ID、摘要、图标和状态；没有则创建，正确的关联直接复用。
+2. 按 Confluence 应用类型、站点和页面 ID 查找原生关联。没有则创建，
+   已有且正确则复用，需要更新时保留关联 ID、摘要、图标和状态。
+   普通 Web links 作为独立记录完整保留，包括指向同一页面的链接。
 3. 写入 `application.type=com.atlassian.confluence`、应用名称、
    `relationship=Wiki Page` 和页面信息。**无需查询或配置 `appId`。**
 4. 新建链接使用规范页面 URL 的 SHA-256 构造稳定的 `globalId`，用于 Jira upsert；
@@ -28,9 +28,8 @@
 无法确认则返回错误，不盲目重复写入。底层重试配置仍由上游控制，团队默认保持
 `ATLASSIAN_RETRY_INCLUDE_WRITES=false`。
 
-多个候选或身份冲突会报错，不自动删除关联。读回验证不等于验证 Jira UI 的
-Attachments 展示；首次部署仍应在测试工单上人工检查页面卡片。
-本工具不上传附件文件，也不修改 Confluence 正文或 Jira 描述。
+多个原生关联候选或身份冲突会返回明确错误。`verified=true` 表示 REST 读回
+验证通过；Attachments 的界面展示应在目标部署上单独验证。
 
 ## 适用范围与认证
 
@@ -40,20 +39,10 @@ Attachments 展示；首次部署仍应在测试工单上人工检查页面卡�
 - 复用上游认证、当前请求客户端、只读模式及 `jira_links` 工具集。
 - Jira 凭据必须能查看目标工单并创建/更新 remote link；
   Confluence 凭据必须可以读取页面。无需管理员应用链接查询权限或额外站点映射。
-- 复用上游的 API Token/OAuth 认证路径。真实联调使用普通成员的 Cloud API Token；
-  OAuth 环境需要相应 Jira 写入和 Confluence 读取 scopes，本次未进行 OAuth 真机联调。
+- 复用上游的 API Token/OAuth 认证路径。OAuth 环境需要相应 Jira 写入和
+  Confluence 读取 scopes。
 - 每位研发使用自己的凭据文件；不要把 token 放入仓库或团队共享配置。
-  集中 HTTP 部署仍需按上游文档配置逐用户认证，本次没有新增认证代理。
-
-## 已验证行为
-
-2026-11-06 使用普通成员的现有 Cloud API Token，将已有普通 Web Link 原地补齐
-Confluence 应用类型和关系字段，**请求未携带 `appId` 或 `globalId`**。
-REST 读回确认链接 ID 保持不变；刷新 Jira 后，页面从 Web links 移到 Attachments。
-这验证了该站点上修复路径的实际展示，不代表每个部署或界面版本都已验证。
-
-工具只返回 REST 读回验证结果，不把 UI 展示写成自动检查通过。
-早期开发版本要求的 `JIRA_CONFLUENCE_APP_LINK` 配置已移除，继续使用原有凭据即可。
+  集中 HTTP 部署按上游文档配置逐用户认证。
 
 ## 本地使用
 
@@ -128,13 +117,10 @@ uv run pytest tests/unit/jira/test_links.py tests/unit/jira/test_confluence_link
 uv run python scripts/generate_tool_docs.py --check
 ```
 
-在专用测试工单上依次验证：首次创建、再次调用返回 unchanged、普通 Web Link
-被原地修复，以及 Jira 页面显示 Confluence 卡片。权限不足时应报错。
-本地单元测试使用模拟 API，不能替代真实租户和 UI 验证。
-
-需求发布 Skill 应优先调用实际工具名 `jira_ensure_confluence_link`，仅当返回
-`verified=true` 时宣告 REST 关联完成；未连接此工具时明确说明缺失能力。
-本次没有修改或分发团队外部的 Skill 文件。
+在专用测试工单上依次验证：首次创建、再次调用返回 unchanged、已有原生关联
+的标题更新，以及 Jira 页面显示 Confluence 卡片。若存在指向同一页面的普通
+Web Link，应确认其记录保持原状。权限不足时应返回错误。
+本地单元测试使用模拟 API，部署时还需验证真实 API 和界面展示。
 
 ## 官方接口依据
 

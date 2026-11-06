@@ -3045,11 +3045,12 @@ async def ensure_confluence_link(
 
     Uses the current user's Jira and Confluence credentials. No application ID
     or administrator application-link discovery is required. Reads the real
-    page title, repairs one existing Web Link in place, or creates a link with
-    a stable, caller-defined globalId. Preserves an existing link's globalId,
-    including links without one.
-    Duplicate or conflicting links fail without deleting anything. Only a
-    successful REST readback returns verified=true; this does not verify the UI.
+    page title and creates or updates a native Confluence link with a stable,
+    caller-defined globalId. Existing native links retain their identity.
+    Ordinary Web Links are preserved as separate records, including those
+    pointing to the same page. Ambiguous native links or identity conflicts
+    return an error. Only a successful REST readback returns verified=true;
+    this does not verify the UI.
     Short links and Server/Data Center are not supported by this tool.
 
     Args:
