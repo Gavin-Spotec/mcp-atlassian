@@ -15,10 +15,11 @@ from requests.exceptions import HTTPError
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.jira.constants import DEFAULT_READ_JIRA_FIELDS
 from mcp_atlassian.jira.forms_common import convert_datetime_to_timestamp
+from mcp_atlassian.jira.links import confluence_page_id
 from mcp_atlassian.models.jira import JiraAttachment
 from mcp_atlassian.models.jira.common import JiraUser
 from mcp_atlassian.servers.async_utils import run_jira_fetcher_call
-from mcp_atlassian.servers.dependencies import get_jira_fetcher
+from mcp_atlassian.servers.dependencies import get_confluence_fetcher, get_jira_fetcher
 from mcp_atlassian.servers.error_handling import ErrorPreservingFastMCP
 from mcp_atlassian.servers.helpers import resolve_transition
 from mcp_atlassian.utils.decorators import check_write_access
@@ -3017,6 +3018,68 @@ async def create_remote_issue_link(
         link_data["relationship"] = relationship
 
     result = jira.create_remote_issue_link(issue_key, link_data)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "toolset:jira_links"},
+    annotations={
+        "title": "Ensure Confluence Page Link",
+        "destructiveHint": False,
+        "idempotentHint": True,
+    },
+)
+@check_write_access
+async def ensure_confluence_link(
+    ctx: Context,
+    issue_key: Annotated[
+        str,
+        Field(description="Jira issue key, e.g. PROJ-123", pattern=ISSUE_KEY_PATTERN),
+    ],
+    confluence_page_url: Annotated[
+        str,
+        Field(description="Full Confluence page URL containing its numeric page ID"),
+    ],
+) -> str:
+    """Ensure a verified native Confluence page association on a Jira Cloud issue.
+
+    Uses the current user's Jira and Confluence credentials. No application ID
+    or administrator application-link discovery is required. Reads the real
+    page title and creates or updates a native Confluence link with a stable,
+    caller-defined globalId. Existing native links retain their identity.
+    Ambiguous native links or identity conflicts return an error. Only a
+    successful REST readback returns verified=true; this does not verify the UI.
+    Short links and Server/Data Center are not supported by this tool.
+
+    Args:
+        ctx: Request context used to resolve this user's Jira and Confluence clients.
+        issue_key: Jira issue key.
+        confluence_page_url: Page URL on the configured Confluence site.
+
+    Returns:
+        JSON with action, verified, link_id, global_id and page_url.
+
+    Raises:
+        ValueError: Invalid URL, unavailable services or ambiguous page links.
+        RuntimeError: The association could not be verified after writing.
+    """
+    jira = await get_jira_fetcher(ctx)
+    confluence = await get_confluence_fetcher(ctx)
+    if not jira.config.is_cloud or not confluence.config.is_cloud:
+        raise ValueError("Native Confluence linking currently supports Cloud only.")
+    base_url = confluence.config.url.rstrip("/")
+    page_id = confluence_page_id(confluence_page_url, base_url)
+    # 使用当前请求的客户端读取页面，不能信任模型提供的标题或其他租户的页面信息。
+    page = await run_jira_fetcher_call(
+        confluence.get_page_content, page_id, convert_to_markdown=False
+    )
+    if page.id != page_id or page.type != "page" or page.status != "current":
+        raise ValueError(
+            "The URL must identify an accessible, published Confluence page."
+        )
+    result = await run_jira_fetcher_call(
+        jira.ensure_confluence_link, issue_key, base_url, page_id, page.title
+    )
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 

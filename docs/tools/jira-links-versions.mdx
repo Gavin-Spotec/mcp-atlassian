@@ -81,6 +81,21 @@ Create a remote issue link (web link or Confluence link) for a Jira issue.
 
 ---
 
+### Ensure Confluence Page Link
+
+Ensure a verified native Confluence page association on a Jira Cloud issue.
+
+<Note>This is a **write** tool. Disabled when `READ_ONLY_MODE=true`.</Note>
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `issue_key` | `string` | Yes | Jira issue key, e.g. PROJ-123 |
+| `confluence_page_url` | `string` | Yes | Full Confluence page URL containing its numeric page ID |
+
+---
+
 ### Get Project Versions
 
 Get all fix versions for a specific Jira project.
