@@ -186,7 +186,6 @@ class JiraConfig:
     client_key_password: str | None = None  # Password for encrypted private key
     sla_config: SLAConfig | None = None  # Optional SLA configuration
     timeout: int = 75  # Connection timeout in seconds
-    confluence_app_link: str | None = None  # Admin-verified, site-bound JSON mapping
     internal_only_projects: frozenset[str] = field(
         default_factory=frozenset
     )  # Project keys where jira_add_comment/jira_edit_comment enforce
@@ -383,7 +382,6 @@ class JiraConfig:
             client_key_password=client_key_password,
             timeout=timeout,
             internal_only_projects=internal_only_projects,
-            confluence_app_link=os.getenv("JIRA_CONFLUENCE_APP_LINK"),
         )
 
     def is_auth_configured(self) -> bool:

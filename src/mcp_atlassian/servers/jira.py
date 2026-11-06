@@ -3043,10 +3043,11 @@ async def ensure_confluence_link(
 ) -> str:
     """Ensure a verified native Confluence page association on a Jira Cloud issue.
 
-    Requires both Jira and Confluence credentials and access to Jira application
-    links (or an administrator-verified JIRA_CONFLUENCE_APP_LINK mapping).
-    Reads the real page title and application link ID, repairs a single
-    existing Web Link in place, or creates a link with a stable globalId.
+    Uses the current user's Jira and Confluence credentials. No application ID
+    or administrator application-link discovery is required. Reads the real
+    page title, repairs one existing Web Link in place, or creates a link with
+    a stable, caller-defined globalId. Preserves an existing link's globalId,
+    including links without one.
     Duplicate or conflicting links fail without deleting anything. Only a
     successful REST readback returns verified=true; this does not verify the UI.
     Short links and Server/Data Center are not supported by this tool.
@@ -3060,7 +3061,7 @@ async def ensure_confluence_link(
         JSON with action, verified, link_id, global_id and page_url.
 
     Raises:
-        ValueError: Invalid URL, unavailable services or ambiguous application links.
+        ValueError: Invalid URL, unavailable services or ambiguous page links.
         RuntimeError: The association could not be verified after writing.
     """
     jira = await get_jira_fetcher(ctx)

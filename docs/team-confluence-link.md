@@ -14,13 +14,13 @@
 ```
 
 1. 使用当前请求的 Confluence 客户端读取页面，验证页面可访问、已发布，取得真实标题。
-2. 从 Jira `/rest/applinks/3.0/applinks` 取得对应 Confluence 应用的真实 `appId`。
-   接口不可用时，可使用管理员事先核实并配置的站点映射。
-   `appId` 与 OAuth 的 `cloudId` 不同，不允许猜测或代替。
-3. 按站点、页面 ID 和 `globalId` 查找关联。唯一普通 Web Link 原地修复，
+2. 按站点和页面 ID 查找关联。唯一普通 Web Link 原地修复，
    保留链接 ID、摘要、图标和状态；没有则创建，正确的关联直接复用。
-4. 写入完整的 `globalId`、`application.type=com.atlassian.confluence`、
-   应用名称、`relationship=Wiki Page` 和页面信息。
+3. 写入 `application.type=com.atlassian.confluence`、应用名称、
+   `relationship=Wiki Page` 和页面信息。**无需查询或配置 `appId`。**
+4. 新建链接使用规范页面 URL 的 SHA-256 构造稳定的 `globalId`，用于 Jira upsert；
+   这是调用方自定义的标识。已有链接保留原来的 `globalId`，没有则仍不传，
+   不改写既有的 `appId=...&pageId=...` 格式。
 5. 再次读取关联并核对字段，只有验证成功才返回 `verified=true`。
 
 `action` 为 `created`、`updated`、`unchanged` 或 `reconciled`。
@@ -39,31 +39,21 @@ Attachments 展示；首次部署仍应在测试工单上人工检查页面卡�
   `/wiki/pages/viewpage.action?pageId=ID`；短链接需要先换成完整页面地址。
 - 复用上游认证、当前请求客户端、只读模式及 `jira_links` 工具集。
 - Jira 凭据必须能查看目标工单并创建/更新 remote link；
-  读取应用链接的权限可由管理员一次性配置映射替代；
-  Confluence 凭据必须可以读取页面。403/404 不会退化为创建普通 Web Link。
-- 应用链接接口在不同认证方式/部署下的可用性不同。第一版建议先用各自的
-  Cloud API Token 验证；本扩展未单独验证 OAuth 网关上的应用链接接口。
-  即使基础 OAuth 登录成功，也不能据此保证本工具可用。
+  Confluence 凭据必须可以读取页面。无需管理员应用链接查询权限或额外站点映射。
+- 复用上游的 API Token/OAuth 认证路径。真实联调使用普通成员的 Cloud API Token；
+  OAuth 环境需要相应 Jira 写入和 Confluence 读取 scopes，本次未进行 OAuth 真机联调。
 - 每位研发使用自己的凭据文件；不要把 token 放入仓库或团队共享配置。
   集中 HTTP 部署仍需按上游文档配置逐用户认证，本次没有新增认证代理。
 
-## 应用链接查询返回 403/404 时
+## 已验证行为
 
-管理员登录 Jira 后读取该站点的 `/rest/applinks/3.0/applinks`，找到
-`type=confluence` 且 `displayUrl` 对应目标 Confluence 站点的条目。
-将真实 `id`、`name` 和两个站点地址放进各成员本地环境文件：
+2026-11-06 使用普通成员的现有 Cloud API Token，将已有普通 Web Link 原地补齐
+Confluence 应用类型和关系字段，**请求未携带 `appId` 或 `globalId`**。
+REST 读回确认链接 ID 保持不变；刷新 Jira 后，页面从 Web links 移到 Attachments。
+这验证了该站点上修复路径的实际展示，不代表每个部署或界面版本都已验证。
 
-```dotenv
-JIRA_CONFLUENCE_APP_LINK='{"jira_url":"https://your-site.atlassian.net","confluence_url":"https://your-site.atlassian.net/wiki","app_id":"ADMIN-VERIFIED-APP-ID","app_name":"System Confluence"}'
-```
-
-示例 ID 必须替换。该配置不是凭据；仍需每位用户自己的 token 和工单权限。
-配置同时匹配 Jira 客户端实际地址和 Confluence 地址，站点不匹配直接拒绝。
-此配置入口仅支持 Basic/API Token 认证；OAuth 不使用此回退配置。
-
-结果字段 `application_id_source` 区分 `jira_application_links`（实时查询）与
-`administrator_configuration`（管理员配置）。后者的正确性由管理员首次核实；
-工具的 `verified=true` 只说明 Jira 读回字段匹配，不证明手填 ID 的来源或 UI 展示。
+工具只返回 REST 读回验证结果，不把 UI 展示写成自动检查通过。
+早期开发版本要求的 `JIRA_CONFLUENCE_APP_LINK` 配置已移除，继续使用原有凭据即可。
 
 ## 本地使用
 
@@ -148,5 +138,5 @@ uv run python scripts/generate_tool_docs.py --check
 
 ## 官方接口依据
 
-- [Atlassian：通过 REST API 关联 Confluence 页面](https://support.atlassian.com/jira/kb/how-to-link-a-confluence-page-on-a-jira-cloud-issue-via-rest-api/)
+- [Atlassian 原生关联示例（其中 appId 格式不作为本工具前置条件）](https://support.atlassian.com/jira/kb/how-to-link-a-confluence-page-on-a-jira-cloud-issue-via-rest-api/)
 - [Jira Remote Links REST API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/)
