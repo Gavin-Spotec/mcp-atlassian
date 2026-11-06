@@ -1,15 +1,52 @@
 """Module for Jira issue link operations."""
 
+import json
 import logging
+import re
+from copy import deepcopy
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
-from requests.exceptions import HTTPError
+from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 from ..models.jira import JiraIssueLinkType
 from ..utils.decorators import handle_auth_errors
 from .client import JiraClient
 
 logger = logging.getLogger("mcp-jira")
+
+
+def confluence_page_id(url: str, base_url: str) -> str:
+    """Extract a page ID only from a URL on the configured Confluence site.
+
+    Supports Cloud /wiki/spaces/.../pages/ID and viewpage.action?pageId=ID.
+    Short links are deliberately rejected; no user-supplied URL is fetched.
+    """
+    base = urlsplit(base_url)
+    page = urlsplit(url)
+    if (
+        base.scheme != "https"
+        or not base.hostname
+        or base.username
+        or base.password
+        or base.query
+        or base.fragment
+        or base.path.rstrip("/") != "/wiki"
+        or page.scheme != base.scheme
+        or page.netloc.lower() != base.netloc.lower()
+        or page.username
+        or page.password
+    ):
+        raise ValueError("Use an HTTPS page URL on the configured Confluence site.")
+    path = page.path
+    match = re.fullmatch(r"/wiki/spaces/[^/]+/pages/([1-9][0-9]*)(?:/.*)?", path)
+    if match:
+        return match.group(1)
+    if path == "/wiki/pages/viewpage.action":
+        ids = parse_qs(page.query).get("pageId", [])
+        if len(ids) == 1 and re.fullmatch(r"[1-9][0-9]*", ids[0]):
+            return ids[0]
+    raise ValueError("Use a full Confluence page URL containing a numeric page ID.")
 
 
 class LinksMixin(JiraClient):
@@ -258,6 +295,246 @@ class LinksMixin(JiraClient):
             )
             msg = f"Error getting remote links for {issue_key}: {error_msg}"
             raise Exception(msg) from e
+
+    def _confluence_application(self, base_url: str) -> dict[str, str]:
+        """Find the actual Confluence application link, never substitute cloudId."""
+        configured = self.config.confluence_app_link
+        if configured:
+            # 管理员只需核实一次；同时绑定两个站点，不能让其他租户复用此 appId。
+            if self.config.auth_type != "basic":
+                raise ValueError(
+                    "Configured Confluence application links require Basic auth; "
+                    "OAuth application link discovery must be verified separately."
+                )
+            try:
+                mapping = json.loads(configured)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    "JIRA_CONFLUENCE_APP_LINK must be a JSON object."
+                ) from exc
+            fields = ("jira_url", "confluence_url", "app_id", "app_name")
+            if not isinstance(mapping, dict) or any(
+                not isinstance(mapping.get(key), str) or not mapping[key].strip()
+                for key in fields
+            ):
+                raise ValueError(
+                    "JIRA_CONFLUENCE_APP_LINK needs jira_url, confluence_url, "
+                    "app_id and app_name."
+                )
+            if (
+                mapping["jira_url"].rstrip("/") != self.config.url.rstrip("/")
+                or mapping["jira_url"].rstrip("/") != self.jira.url.rstrip("/")
+                or mapping["confluence_url"].rstrip("/") != base_url.rstrip("/")
+            ):
+                raise ValueError(
+                    "Configured application link does not match this site."
+                )
+            if not re.fullmatch(r"[A-Za-z0-9-]+", mapping["app_id"]):
+                raise ValueError("Configured Confluence application ID is invalid.")
+            return {
+                "id": mapping["app_id"],
+                "name": mapping["app_name"],
+                "source": "administrator_configuration",
+            }
+        try:
+            applications: Any = self.jira.get("rest/applinks/3.0/applinks")
+        except HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (403, 404):
+                raise ValueError(
+                    "Jira application link discovery is unavailable (HTTP 403/404). "
+                    "Ask an administrator to verify and configure "
+                    "JIRA_CONFLUENCE_APP_LINK; do not substitute cloudId."
+                ) from exc
+            raise
+        if not isinstance(applications, list):
+            raise ValueError("Unexpected Jira application links response.")
+        target = urlsplit(base_url)
+        matches = []
+        for app in applications:
+            if not isinstance(app, dict) or app.get("type") != "confluence":
+                continue
+            for key in ("displayUrl", "rpcUrl"):
+                address = app.get(key)
+                if not isinstance(address, str):
+                    continue
+                parsed = urlsplit(address)
+                if (
+                    parsed.scheme == target.scheme
+                    and parsed.netloc.lower() == target.netloc.lower()
+                    and parsed.path.rstrip("/") == target.path.rstrip("/")
+                    and not parsed.query
+                    and not parsed.fragment
+                ):
+                    matches.append(app)
+                    break
+        if len(matches) != 1:
+            raise ValueError(
+                "Expected exactly one Confluence application link for this site; "
+                "ask a Jira administrator to check application links."
+            )
+        app = matches[0]
+        if not isinstance(app.get("id"), str) or not re.fullmatch(
+            r"[A-Za-z0-9-]+", app["id"]
+        ):
+            raise ValueError("Confluence application link has no valid ID.")
+        if not isinstance(app.get("name"), str) or not app["name"].strip():
+            raise ValueError("Confluence application link has no name.")
+        return {
+            "id": app["id"],
+            "name": app["name"],
+            "source": "jira_application_links",
+        }
+
+    @handle_auth_errors("Jira API")
+    def ensure_confluence_link(
+        self, issue_key: str, base_url: str, page_id: str, title: str
+    ) -> dict[str, Any]:
+        """Create, repair or reuse a native Confluence remote link on Jira Cloud.
+
+        Args:
+            issue_key: Jira issue key.
+            base_url: Configured Confluence URL, including /wiki.
+            page_id: Page ID already read and verified through Confluence.
+            title: Current title read from Confluence, not supplied by the model.
+
+        Returns:
+            Verified link ID and action (created, updated, unchanged, reconciled).
+            Verification covers REST data, not Jira's UI rendering.
+
+        Raises:
+            ValueError: Unsupported deployment, ambiguous links or invalid metadata.
+            RuntimeError: Write outcome or readback could not be verified.
+            MCPAtlassianAuthenticationError: Jira denies access.
+        """
+        if not self.config.is_cloud:
+            raise ValueError("Native Confluence linking currently supports Jira Cloud.")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*-[1-9][0-9]*", issue_key):
+            raise ValueError("A valid Jira Cloud issue key is required.")
+        if not re.fullmatch(r"[1-9][0-9]*", page_id) or not title.strip():
+            raise ValueError("Verified Confluence page ID and title are required.")
+        url = f"{base_url.rstrip('/')}/pages/viewpage.action?pageId={page_id}"
+        confluence_page_id(url, base_url)
+        app = self._confluence_application(base_url)
+        global_id = f"appId={app['id']}&pageId={page_id}"
+        endpoint = f"rest/api/3/issue/{issue_key}/remotelink"
+
+        def read_candidates() -> list[dict[str, Any]]:
+            # 读取失败或结构异常不能当作“没有链接”，否则会重复创建。
+            links: Any = self.jira.get(endpoint)
+            if not isinstance(links, list) or any(
+                not isinstance(link, dict) for link in links
+            ):
+                raise ValueError("Unexpected Jira remote links response.")
+            matches = []
+            for link in links:
+                obj = link.get("object") or {}
+                address = obj.get("url") if isinstance(obj, dict) else None
+                same_page = False
+                if isinstance(address, str):
+                    try:
+                        same_page = confluence_page_id(address, base_url) == page_id
+                    except ValueError:
+                        pass
+                if same_page or link.get("globalId") == global_id:
+                    matches.append(link)
+            if len(matches) > 1:
+                raise ValueError(
+                    "Multiple links reference this Confluence page; "
+                    "resolve duplicates before retrying. No links were deleted."
+                )
+            return matches
+
+        candidates = read_candidates()
+        previous = candidates[0] if candidates else None
+        if previous and previous.get("globalId") not in (None, "", global_id):
+            raise ValueError("Existing page link has a conflicting globalId.")
+        if previous and (previous.get("application") or {}).get("type") not in (
+            None,
+            "",
+            "com.atlassian.confluence",
+        ):
+            raise ValueError("Existing page link belongs to another application.")
+        # Jira 的 PUT 会清空遗漏字段，保留原链接的摘要、图标和状态等数据。
+        payload: dict[str, Any] = {
+            "globalId": global_id,
+            "application": {
+                **deepcopy((previous or {}).get("application") or {}),
+                "type": "com.atlassian.confluence",
+                "name": app["name"],
+            },
+            "relationship": "Wiki Page",
+            "object": {
+                **deepcopy((previous or {}).get("object") or {}),
+                "url": url,
+                "title": title,
+            },
+        }
+
+        def verified(link: dict[str, Any]) -> bool:
+            obj = link.get("object") or {}
+            application = link.get("application") or {}
+            try:
+                same_page = confluence_page_id(obj.get("url", ""), base_url) == page_id
+            except ValueError:
+                same_page = False
+            return bool(
+                str(link.get("id", "")).isdigit()
+                and link.get("globalId") == global_id
+                and application.get("type") == "com.atlassian.confluence"
+                and application.get("name") == app["name"]
+                and link.get("relationship") == "Wiki Page"
+                and obj.get("title") == title
+                and same_page
+                and (previous is None or str(link["id"]) == str(previous.get("id")))
+            )
+
+        def result(action: str, link: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "success": True,
+                "verified": True,
+                "verification": "jira_remote_link_readback",
+                "action": action,
+                "issue_key": issue_key,
+                "page_id": page_id,
+                "link_id": str(link["id"]),
+                "global_id": global_id,
+                "application_id_source": app["source"],
+                "page_url": url,
+            }
+
+        if previous and verified(previous):
+            return result("unchanged", previous)
+        action = "updated" if previous else "created"
+        uncertain = False
+        try:
+            if previous:
+                link_id = str(previous.get("id", ""))
+                if not link_id.isdigit():
+                    raise ValueError("Existing Jira remote link has no valid ID.")
+                self.jira.put(f"{endpoint}/{link_id}", data=payload)
+            else:
+                # globalId 使服务端按同一页面执行 upsert；并发调用也使用相同标识。
+                self.jira.post(endpoint, json=payload)
+        except (Timeout, ConnectionError):
+            uncertain = True
+        except HTTPError as exc:
+            if exc.response is None or exc.response.status_code < 500:
+                raise
+            uncertain = True
+        # 超时或服务端错误后先读回，不盲目重发写请求，也不凭 HTTP 2xx 报成功。
+        try:
+            after = read_candidates()
+        except (ValueError, HTTPError, Timeout, ConnectionError) as exc:
+            raise RuntimeError(
+                "Write may have succeeded, but readback failed. "
+                "Inspect the issue links before retrying."
+            ) from exc
+        if len(after) != 1 or not verified(after[0]):
+            raise RuntimeError(
+                "Confluence link verification failed; write may have succeeded. "
+                "Inspect the issue links before retrying."
+            )
+        return result("reconciled" if uncertain else action, after[0])
 
     @handle_auth_errors("Jira API")
     def remove_issue_link(self, link_id: str) -> dict[str, Any]:

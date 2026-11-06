@@ -80,6 +80,7 @@ CATEGORY_TOOLS: dict[str, list[str]] = {
         "jira_remove_issue_link",
         "jira_link_to_epic",
         "jira_create_remote_issue_link",
+        "jira_ensure_confluence_link",
         "jira_get_project_versions",
         "jira_get_project_components",
         "jira_create_version",

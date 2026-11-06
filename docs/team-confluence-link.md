@@ -1,0 +1,152 @@
+# 团队版 Jira–Confluence 关联工具
+
+本仓库是 `sooperset/mcp-atlassian` 的团队 fork。新增工具是
+`jira_ensure_confluence_link`（遵循上游 `jira_` 前缀），不是官方 Rovo MCP 工具，
+也不使用 `ensure_jira_confluence_link` 这个未注册名称。
+
+## 工具行为
+
+```json
+{
+  "issue_key": "PROJ-123",
+  "confluence_page_url": "https://your-site.atlassian.net/wiki/spaces/TEAM/pages/123456/Plan"
+}
+```
+
+1. 使用当前请求的 Confluence 客户端读取页面，验证页面可访问、已发布，取得真实标题。
+2. 从 Jira `/rest/applinks/3.0/applinks` 取得对应 Confluence 应用的真实 `appId`。
+   接口不可用时，可使用管理员事先核实并配置的站点映射。
+   `appId` 与 OAuth 的 `cloudId` 不同，不允许猜测或代替。
+3. 按站点、页面 ID 和 `globalId` 查找关联。唯一普通 Web Link 原地修复，
+   保留链接 ID、摘要、图标和状态；没有则创建，正确的关联直接复用。
+4. 写入完整的 `globalId`、`application.type=com.atlassian.confluence`、
+   应用名称、`relationship=Wiki Page` 和页面信息。
+5. 再次读取关联并核对字段，只有验证成功才返回 `verified=true`。
+
+`action` 为 `created`、`updated`、`unchanged` 或 `reconciled`。
+`reconciled` 表示写请求超时或出现连接/服务端错误，但读回确认关联已正确存在；
+无法确认则返回错误，不盲目重复写入。底层重试配置仍由上游控制，团队默认保持
+`ATLASSIAN_RETRY_INCLUDE_WRITES=false`。
+
+多个候选或身份冲突会报错，不自动删除关联。读回验证不等于验证 Jira UI 的
+Attachments 展示；首次部署仍应在测试工单上人工检查页面卡片。
+本工具不上传附件文件，也不修改 Confluence 正文或 Jira 描述。
+
+## 适用范围与认证
+
+- 第一版支持 Jira Cloud + Confluence Cloud，`CONFLUENCE_URL` 必须包含 `/wiki`。
+- 页面 URL 支持 `/wiki/spaces/SPACE/pages/ID/...` 和
+  `/wiki/pages/viewpage.action?pageId=ID`；短链接需要先换成完整页面地址。
+- 复用上游认证、当前请求客户端、只读模式及 `jira_links` 工具集。
+- Jira 凭据必须能查看目标工单并创建/更新 remote link；
+  读取应用链接的权限可由管理员一次性配置映射替代；
+  Confluence 凭据必须可以读取页面。403/404 不会退化为创建普通 Web Link。
+- 应用链接接口在不同认证方式/部署下的可用性不同。第一版建议先用各自的
+  Cloud API Token 验证；本扩展未单独验证 OAuth 网关上的应用链接接口。
+  即使基础 OAuth 登录成功，也不能据此保证本工具可用。
+- 每位研发使用自己的凭据文件；不要把 token 放入仓库或团队共享配置。
+  集中 HTTP 部署仍需按上游文档配置逐用户认证，本次没有新增认证代理。
+
+## 应用链接查询返回 403/404 时
+
+管理员登录 Jira 后读取该站点的 `/rest/applinks/3.0/applinks`，找到
+`type=confluence` 且 `displayUrl` 对应目标 Confluence 站点的条目。
+将真实 `id`、`name` 和两个站点地址放进各成员本地环境文件：
+
+```dotenv
+JIRA_CONFLUENCE_APP_LINK='{"jira_url":"https://your-site.atlassian.net","confluence_url":"https://your-site.atlassian.net/wiki","app_id":"ADMIN-VERIFIED-APP-ID","app_name":"System Confluence"}'
+```
+
+示例 ID 必须替换。该配置不是凭据；仍需每位用户自己的 token 和工单权限。
+配置同时匹配 Jira 客户端实际地址和 Confluence 地址，站点不匹配直接拒绝。
+此配置入口仅支持 Basic/API Token 认证；OAuth 不使用此回退配置。
+
+结果字段 `application_id_source` 区分 `jira_application_links`（实时查询）与
+`administrator_configuration`（管理员配置）。后者的正确性由管理员首次核实；
+工具的 `verified=true` 只说明 Jira 读回字段匹配，不证明手填 ID 的来源或 UI 展示。
+
+## 本地使用
+
+安装 uv 后，在仓库执行：
+
+```bash
+uv sync --frozen --all-extras --dev
+uv run --frozen mcp-atlassian --env-file /absolute/path/atlassian.env --transport stdio
+```
+
+凭据文件字段与上游一致（值仅为占位示例）：
+
+```dotenv
+JIRA_URL=https://your-site.atlassian.net
+JIRA_USERNAME=your-email@example.com
+JIRA_API_TOKEN=your-own-token
+CONFLUENCE_URL=https://your-site.atlassian.net/wiki
+CONFLUENCE_USERNAME=your-email@example.com
+CONFLUENCE_API_TOKEN=your-own-token
+```
+
+将文件放在仓库外并限制读取权限。配置支持 `mcpServers` 的客户端时：
+
+```json
+{
+  "mcpServers": {
+    "team-atlassian": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "/absolute/path/mcp-atlassian",
+        "--frozen",
+        "mcp-atlassian",
+        "--env-file", "/absolute/path/atlassian.env",
+        "--transport", "stdio"
+      ]
+    }
+  }
+}
+```
+
+将原社区版 MCP 条目替换为团队版，避免两套相同工具重复注册。
+若使用 `ENABLED_TOOLS` 白名单，加入 `jira_ensure_confluence_link`；
+若使用 `TOOLSETS`，包含 `jira_links`。重启/重新连接客户端后检查 tools/list。
+
+## 发布给团队
+
+代码审查和测试通过后，将功能分支合并进 fork 的发布分支，再创建不可变版本标签。
+以下 `v0.23.1+team.1` **仅为示例，尚未发布**：
+
+```bash
+git tag -a v0.23.1+team.1 -m 'Team release: verified Confluence page linking'
+git push origin v0.23.1+team.1
+```
+
+同事可以通过已发布标签启动，无需发布到 PyPI：
+
+```bash
+uvx --from 'git+https://github.com/Gavin-Spotec/mcp-atlassian.git@v0.23.1+team.1' \
+  mcp-atlassian --env-file /absolute/path/atlassian.env --transport stdio
+```
+
+更严格的版本固定可使用完整 Git commit SHA。Git 源码标签固定的是源码，
+`uvx --from` 安装时的间接依赖未必使用仓库 `uv.lock`；如需完整复现依赖，
+使用固定标签的本地 checkout + `uv sync --frozen` / `uv run --frozen`。
+升级使用新标签，回滚改回旧标签，不覆盖已发布标签。
+
+## 发布前验证
+
+```bash
+uv run pytest tests/unit/jira/test_links.py tests/unit/jira/test_confluence_links.py tests/unit/servers/test_confluence_link_tool.py
+uv run python scripts/generate_tool_docs.py --check
+```
+
+在专用测试工单上依次验证：首次创建、再次调用返回 unchanged、普通 Web Link
+被原地修复，以及 Jira 页面显示 Confluence 卡片。权限不足时应报错。
+本地单元测试使用模拟 API，不能替代真实租户和 UI 验证。
+
+需求发布 Skill 应优先调用实际工具名 `jira_ensure_confluence_link`，仅当返回
+`verified=true` 时宣告 REST 关联完成；未连接此工具时明确说明缺失能力。
+本次没有修改或分发团队外部的 Skill 文件。
+
+## 官方接口依据
+
+- [Atlassian：通过 REST API 关联 Confluence 页面](https://support.atlassian.com/jira/kb/how-to-link-a-confluence-page-on-a-jira-cloud-issue-via-rest-api/)
+- [Jira Remote Links REST API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-remote-links/)
